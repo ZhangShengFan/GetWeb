@@ -1,0 +1,246 @@
+name: Build EXE
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: '目标网址'
+        required: true
+      app_name:
+        description: '应用名称（支持中文）'
+        required: true
+      version:
+        description: '版本号'
+        required: true
+        default: '1.0.0'
+      icon_url:
+        description: '图标 URL（可为空）'
+        required: false
+        default: ''
+      task_id:
+        description: '任务 ID'
+        required: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Init project
+        shell: pwsh
+        run: |
+          npm init -y
+          npm install electron electron-builder --save-dev
+
+      - name: Generate main.js
+        shell: pwsh
+        run: |
+          $targetUrl = '${{ inputs.url }}'
+          $escaped   = $targetUrl -replace "'", "''"
+          $main = @'
+          const { app, BrowserWindow, Menu } = require('electron')
+
+          app.whenReady().then(() => {
+            Menu.setApplicationMenu(null)
+
+            const win = new BrowserWindow({
+              width: 1280,
+              height: 800,
+              show: false,
+              webPreferences: {
+                nodeIntegration: false,
+                contextIsolation: true,
+              }
+            })
+
+            win.once('ready-to-show', () => win.show())
+
+            const pbCSS = `
+              #__pb_wrap__ {
+                position:fixed;top:0;left:0;width:100%;height:4px;
+                z-index:2147483647;pointer-events:none;
+              }
+              #__pb_bar__ {
+                height:4px;width:0%;
+                border-radius:0 4px 4px 0;
+                background:#3B82F6;
+                box-shadow:0 0 10px rgba(59,130,246,0.6);
+                transition:width 0.3s cubic-bezier(0.4,0,0.2,1);
+              }
+            `
+
+            const pbInitJS = `
+              (function() {
+                if (document.getElementById('__pb_wrap__')) return
+                const style = document.createElement('style')
+                style.textContent = ${JSON.stringify(pbCSS.replace(/`/g,''))}
+                document.head.appendChild(style)
+                const wrap = document.createElement('div')
+                wrap.id = '__pb_wrap__'
+                const bar = document.createElement('div')
+                bar.id = '__pb_bar__'
+                wrap.appendChild(bar)
+                document.body.appendChild(wrap)
+                let p = 0
+                window.__pbT__ = setInterval(() => {
+                  if (p < 85) {
+                    p += p < 30 ? Math.random()*6 : p < 60 ? Math.random()*3 : Math.random()*0.8
+                    p = Math.min(p, 85)
+                    bar.style.width = p + '%'
+                    const t = p/85
+                    const r = Math.round(59  + (34 -59 )*t)
+                    const g = Math.round(130 + (197-130)*t)
+                    const b = Math.round(246 + (94 -246)*t)
+                    bar.style.background = 'rgb('+r+','+g+','+b+')'
+                    bar.style.boxShadow  = '0 0 10px rgba('+r+','+g+','+b+',0.65)'
+                  }
+                }, 180)
+              })()
+            `
+
+            const pbDoneJS = `
+              (function() {
+                const bar = document.getElementById('__pb_bar__')
+                if (!bar) return
+                clearInterval(window.__pbT__)
+                bar.style.transition = 'width 0.25s ease,opacity 0.4s ease 0.35s'
+                bar.style.width = '100%'
+                bar.style.background = '#22C55E'
+                bar.style.boxShadow = '0 0 12px rgba(34,197,94,0.7)'
+                setTimeout(() => {
+                  bar.style.opacity = '0'
+                  setTimeout(() => {
+                    const w = document.getElementById('__pb_wrap__')
+                    if (w) w.remove()
+                  }, 450)
+                }, 350)
+              })()
+            `
+
+            const pbFailJS = `
+              (function() {
+                const bar = document.getElementById('__pb_bar__')
+                if (!bar) return
+                clearInterval(window.__pbT__)
+                bar.style.width = '100%'
+                bar.style.background = '#EF4444'
+                bar.style.boxShadow = '0 0 10px rgba(239,68,68,0.7)'
+                setTimeout(() => {
+                  bar.style.opacity = '0'
+                  setTimeout(() => {
+                    const w = document.getElementById('__pb_wrap__')
+                    if (w) w.remove()
+                  }, 450)
+                }, 900)
+              })()
+            `
+
+            win.webContents.on('did-finish-load', () => {
+              win.webContents.executeJavaScript(pbInitJS).catch(() => {})
+              setTimeout(() => {
+                win.webContents.executeJavaScript(pbDoneJS).catch(() => {})
+              }, 300)
+            })
+
+            win.webContents.on('did-fail-load', () => {
+              win.webContents.executeJavaScript(pbFailJS).catch(() => {})
+            })
+
+            win.loadURL('TARGET_URL_PLACEHOLDER')
+          })
+
+          app.on('window-all-closed', () => app.quit())
+          '@
+
+          $main = $main -replace 'TARGET_URL_PLACEHOLDER', $escaped
+          Set-Content -Path main.js -Value $main -Encoding UTF8
+
+      - name: Download custom icon
+        if: ${{ inputs.icon_url != '' }}
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path build | Out-Null
+          $url = '${{ inputs.icon_url }}'
+          $tmpFile = 'build/icon_tmp'
+          Invoke-WebRequest -Uri $url -OutFile $tmpFile
+
+          $bytes = [System.IO.File]::ReadAllBytes($tmpFile)
+          if ($bytes[0] -eq 0x89 -and $bytes[1] -eq 0x50 -and $bytes[2] -eq 0x4E -and $bytes[3] -eq 0x47) {
+            Write-Host "检测到 PNG 格式"
+            Move-Item -Force $tmpFile 'build/icon.png'
+          } elseif ($bytes[0] -eq 0x00 -and $bytes[1] -eq 0x00 -and $bytes[2] -eq 0x01 -and $bytes[3] -eq 0x00) {
+            Write-Host "检测到 ICO 格式"
+            Move-Item -Force $tmpFile 'build/icon.ico'
+          } else {
+            Write-Host "未知格式，按 PNG 处理"
+            Move-Item -Force $tmpFile 'build/icon.png'
+          }
+          Get-ChildItem build
+
+      - name: Generate package.json
+        shell: pwsh
+        run: |
+          $productName = '${{ inputs.app_name }}'
+          $rawVersion  = '${{ inputs.version }}'
+
+          $rawVersion = $rawVersion -replace '^[vV]+', ''
+          $rawVersion = $rawVersion -replace '[^0-9.]', ''
+          $rawVersion = $rawVersion.Trim('.')
+          $parts = $rawVersion.Split([char]'.') | Where-Object { $_ -ne '' }
+          while ($parts.Count -lt 3) { $parts += @('0') }
+          $version = $parts[0] + '.' + $parts[1] + '.' + $parts[2]
+
+          $safeName = $productName -replace '[^a-zA-Z0-9\-]', '-'
+          $safeName = $safeName.ToLower().Trim('-')
+          if ([string]::IsNullOrWhiteSpace($safeName) -or $safeName -match '^-+$') {
+            $safeName = 'myapp'
+          }
+          $safeName = $safeName -replace '-{2,}', '-'
+          $safeName = $safeName.Trim('-')
+
+          $json = @"
+          {
+            "name": "$safeName",
+            "version": "$version",
+            "main": "main.js",
+            "build": {
+              "appId": "com.webtoexe.$safeName",
+              "productName": "$productName",
+              "win": {
+                "target": "portable",
+                "executableName": "$safeName"
+              }
+            },
+            "scripts": {
+              "dist": "electron-builder --win"
+            }
+          }
+          "@
+          Set-Content -Path package.json -Value $json -Encoding UTF8
+          Get-Content package.json
+
+      - name: Build EXE
+        shell: pwsh
+        env:
+          GH_TOKEN: ''
+        run: |
+          npx electron-builder --win --x64 --publish never
+
+      - name: Upload EXE as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: exe-${{ inputs.task_id }}
+          path: dist/*.exe
+          if-no-files-found: error
+
+      - name: Print artifact info
+        shell: pwsh
+        run: |
+          Write-Host "task_id : ${{ inputs.task_id }}"
+          Write-Host "run_id  : ${{ github.run_id }}"
+          Get-ChildItem dist
